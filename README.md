@@ -1,6 +1,12 @@
+# BactoID
+
+<p align="center">
+  <img src="resources/logo/BactoID.png" width="600">
+</p>
+
 **BactoID** is a Snakemake workflow for consensus-based identification of bacterial isolates from Oxford Nanopore Technologies (ONT) full-length 16S rRNA amplicon sequencing data.
 
-The workflow processes demultiplexed ONT FASTQ files, generates high-quality consensus sequences, compares them against a local curated 16S rRNA reference database, and produces a structured Excel report containing taxonomic identification, quality metrics and interpretation flags.
+The workflow processes demultiplexed ONT FASTQ files, generates high-quality consensus sequences, compares them against a local curated 16S rRNA reference database, and produces a structured Excel report containing taxonomic identification, quality metrics and interpretation flags. BactoID is distributed as a single Singularity/Apptainer container containing all required software and reference resources.
 
 
 
@@ -8,26 +14,53 @@ The workflow processes demultiplexed ONT FASTQ files, generates high-quality con
 
 BactoID performs the following steps:
 
-1. Merge FASTQ files for each barcode.
-2. Filter reads by length (default: 1000–2000 bp).
-3. Cluster reads and generate consensus sequences using **NGSpeciesID**.
-4. Polish consensus sequences using **Racon (3 iterations)**.
-5. Search consensus sequences against a local curated **NCBI 16S rRNA database** using **BLAST+**.
-6. Retain the best taxonomic matches.
-7. Evaluate identification quality and taxonomic ambiguity.
-8. Generate a structured Excel report.
+1. automatic detection of barcode directories,
+2. merging of FASTQ files for each barcode,
+3. read-length filtering,
+4. clustering and consensus generation with **NGSpeciesID**,
+5. consensus polishing using **Racon ×3**,
+6. taxonomic identification using **BLAST+**,
+7. identification quality assessment,
+8. detection of possible mixed cultures,
+9. generation of a structured Excel report,
+10. optional replacement of barcode names with user-defined sample names using a manifest file.
 
-## Requirements
-BactoID is designed to run on Linux using:
+## The only external requirement is:
+
+- Linux
+- Singularity or Apptainer
+
+All other software and reference resources are included in the BactoID container.
+
+The container includes:
+
 - Snakemake
-- Singularity / Apptainer
-- Python 3
-### The main bioinformatics tools are provided through containers.
-Current workflow components include:
 - NGSpeciesID
 - Racon
 - BLAST+
-- Python / XlsxWriter
+- Python
+- XlsxWriter
+- Pillow
+- curated NCBI 16S rRNA BLAST database
+- BactoID workflow scripts
+- report-generation scripts
+
+## Download
+
+BactoID v0.5.0 is distributed as a self-contained Singularity/Apptainer image.
+
+**Version 0.5.0:**  
+https://doi.org/10.5281/zenodo.23076229
+
+**All versions / latest release:**  
+https://doi.org/10.5281/zenodo.23076228
+
+Container file:
+
+```text
+BactoID_0.5.0.sif
+```
+
 
 ## Input data
 BactoID expects demultiplexed ONT FASTQ files arranged in barcode directories:
@@ -67,39 +100,55 @@ Example:
 ```bash 
 cd /path/to/BactoID
 
-snakemake \
-  --cores 8 \
-  --use-singularity \
-  --config \
-  input=/path/to/fastq_pass \
-  output=/path/to/BactoID_results
-
+singularity exec \
+  --bind /path/to/data:/data \
+  BactoID_0.5.0.sif \
+  bactoid \
+  --input /data/fastq_pass \
+  --output /data/BactoID_results \
+  --cores 8
   ```
 
   With a sample manifest:
 
  ```bash
- snakemake \
-  --cores 8 \
-  --use-singularity \
-  --config \
-  input=/path/to/fastq_pass \
-  output=/path/to/BactoID_results \
-  manifest=/path/to/manifest.tsv
-  ```
+singularity exec \
+  --bind /path/to/data:/data \
+  BactoID_0.5.0.sif \
+  bactoid \
+  --input /data/fastq_pass \
+  --output /data/BactoID_results \
+  --manifest /data/fastq_pass/manifest.tsv \
+  --cores 8
+```
 
-   On systems requiring explicit directory binding:
+For Apptainer, replace:
+
+```text
+singularity exec
+```
+
+with:
+
+```text
+apptainer exec
+```
+
+## Command-line options
+
+```text
+--input       Path to the directory containing barcodeXX folders
+--output      Path where BactoID results will be created
+--manifest    Optional TSV manifest with Barcode and SampleName columns
+--cores       Number of CPU cores to use (default: 8)
+```
+
+Display help:
 
 ```bash
-snakemake \
-  --cores 8 \
-  --use-singularity \
-  --singularity-args "--bind /path/to/data:/path/to/data" \
-  --config \
-  input=/path/to/fastq_pass \
-  output=/path/to/BactoID_results \
-  manifest=/path/to/manifest.tsv
-  ```
+singularity exec BactoID_0.5.0.sif bactoid --help
+```
+
 
 ### Read filtering
 BactoID is intended for bacterial full-length 16S rRNA amplicons.
@@ -132,6 +181,14 @@ Supporting reads	Status
 20–99	LOW_READ_COUNT
 1–19	VERY_LOW_READ_COUNT
 ```
+### Reference database
+
+Taxonomic identification is performed against a local database derived from the NCBI RefSeq Targeted Loci 16S rRNA collection for bacterial and archaeal type material.
+
+NCBI RefSeq Targeted Loci:
+https://www.ncbi.nlm.nih.gov/refseq/targetedloci/
+
+NCBI 16S ribosomal RNA database (Bacteria and Archaea type strains), snapshot downloaded on 23 July 2026.
 
 ### Multiple clusters
 BactoID does not automatically assume that every sample contains a single organism.
@@ -150,9 +207,10 @@ Different genera
 If substantial independent clusters are assigned to different genera, BactoID reports:
 POSSIBLE_MIXED_CULTURE
 
+
+## Output
+
 ```text
-Output
-Main output:
 BactoID_results/
 ├── report/
 │   ├── BactoID_results.tsv
@@ -180,4 +238,39 @@ For isolates requiring definitive species or strain identification, whole-genome
 ## Validation
 During workflow development, different consensus-polishing strategies were evaluated using experimentally obtained full-length ONT 16S datasets.
 For the tested datasets, three iterations of Racon polishing provided more consistent agreement with curated reference sequences than Medaka polishing and was therefore selected as the default BactoID consensus-polishing strategy.
+
+## Example report
+A complete example of the generated BactoID Excel report is available below:
+
+[📊 View example report](examples/BactoID_results.xlsx)
+
+
+## Citation
+
+If you use BactoID in your research, please cite:
+
+**Średnicka P. BactoID v0.5.0 – containerized ONT full-length 16S bacterial identification workflow. Zenodo.
+https://doi.org/10.5281/zenodo.23076229**
+
+BactoID relies on several third-party tools and resources. If you use BactoID in scientific work, please also cite the corresponding software where appropriate.
+
+- **Snakemake**  
+  Mölder F, Jablonski KP, Letcher B, et al. Sustainable data analysis with Snakemake. *F1000Research*. 2021;10:33.
+
+- **NGSpeciesID**  
+  Sahlin K, Lim MCW, Prost S. NGSpeciesID: DNA barcode and amplicon consensus generation from long-read sequencing data. *Ecology and Evolution*. 2021;11:1392–1398.  
+  https://doi.org/10.1002/ece3.7146
+
+- **Racon**  
+  Vaser R, Sović I, Nagarajan N, Šikić M. Fast and accurate de novo genome assembly from long uncorrected reads. *Genome Research*. 2017;27(5):737–746.  
+  https://doi.org/10.1101/gr.214270.116
+
+- **NCBI BLAST+**  
+  Camacho C, Coulouris G, Avagyan V, et al. BLAST+: architecture and applications. *BMC Bioinformatics*. 2009;10:421.  
+  https://doi.org/10.1186/1471-2105-10-421
+
+- **Singularity / Apptainer**  
+  Kurtzer GM, Sochat V, Bauer MW. Singularity: Scientific containers for mobility of compute. *PLoS ONE*. 2017;12(5):e0177459.  
+  https://doi.org/10.1371/journal.pone.0177459
+
 
