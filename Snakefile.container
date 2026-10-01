@@ -1,0 +1,491 @@
+import os
+import gzip
+import shutil
+from pathlib import Path
+
+
+shell.executable("/bin/bash")
+
+
+# ============================================================
+# Parametry przekazywane przez:
+# --config input=/.../fastq_pass output=/.../BactoID_results
+# ============================================================
+
+INPUT_DIR = config.get("input")
+OUTPUT_DIR = config.get("output")
+MANIFEST = config.get("manifest", "")
+
+if not INPUT_DIR:
+    raise ValueError(
+        "Brak inputu. Użyj: --config input=/sciezka/do/fastq_pass"
+    )
+
+if not OUTPUT_DIR:
+    raise ValueError(
+        "Brak outputu. Użyj: --config output=/sciezka/do/wynikow"
+    )
+
+INPUT_DIR = os.path.abspath(INPUT_DIR)
+OUTPUT_DIR = os.path.abspath(OUTPUT_DIR)
+
+if MANIFEST:
+    MANIFEST = os.path.abspath(MANIFEST)
+
+
+# ============================================================
+# Wersje BactoID i narzędzi
+# ============================================================
+
+PIPELINE_VERSION = Path("/opt/BactoID/VERSION").read_text().strip()
+NGSPECIESID_VERSION = "0.3.1"
+BLAST_VERSION = "2.16.0+"
+
+# BactoID analizuje pełnej długości bakteryjny amplicon 16S.
+# Akceptujemy odczyty w zakresie 1000–2000 bp, a NGSpeciesID
+# otrzymuje oczekiwaną długość 1500 ± 500 bp.
+MIN_READ_LENGTH = 1000
+MAX_READ_LENGTH = 2000
+TARGET_AMPLICON_LENGTH = 1500
+AMPLICON_LENGTH_DEVIATION = 500
+
+DATABASE_NAME = (
+    "NCBI 16S ribosomal RNA "
+    "(Bacteria and Archaea type strains)"
+)
+
+
+# ============================================================
+# Struktura katalogów wynikowych
+# ============================================================
+
+REPORT_DIR = os.path.join(
+    OUTPUT_DIR,
+    "report"
+)
+
+INTERMEDIATE_DIR = os.path.join(
+    OUTPUT_DIR,
+    "intermediate"
+)
+
+MERGED_DIR = os.path.join(
+    INTERMEDIATE_DIR,
+    "merged"
+)
+
+FILTERED_DIR = os.path.join(
+    INTERMEDIATE_DIR,
+    "filtered"
+)
+
+NGSPECIESID_DIR = os.path.join(
+    INTERMEDIATE_DIR,
+    "ngspeciesid"
+)
+
+SELECTED_DIR = os.path.join(
+    INTERMEDIATE_DIR,
+    "selected"
+)
+
+BLAST_RESULTS_DIR = os.path.join(
+    INTERMEDIATE_DIR,
+    "blast"
+)
+
+CLASSIFICATION_DIR = os.path.join(
+    INTERMEDIATE_DIR,
+    "classification"
+)
+
+COMPLETE_DIR = os.path.join(
+    INTERMEDIATE_DIR,
+    "complete"
+)
+
+LOG_DIR = os.path.join(
+    OUTPUT_DIR,
+    "logs"
+)
+
+
+# ============================================================
+# Zasoby i kontenery
+# ============================================================
+
+BLAST_DB = "/opt/BactoID/resources/blastdb/16S_ribosomal_RNA"
+
+LOGO_PATH = "/opt/BactoID/resources/logo/BactoID.png"
+
+
+
+
+
+# ============================================================
+# Automatyczne wykrywanie katalogów barcodeXX
+# ============================================================
+
+SAMPLES = sorted(
+    path.name
+    for path in Path(INPUT_DIR).glob("barcode*")
+    if path.is_dir()
+)
+
+if not SAMPLES:
+    raise ValueError(
+        f"Nie znaleziono katalogów barcode* w: {INPUT_DIR}"
+    )
+
+
+rule all:
+    input:
+        REPORT_DIR + "/BactoID_results.xlsx"
+
+
+# ============================================================
+# Scalenie i rozpakowanie FASTQ dla każdego barcode'u
+# ============================================================
+
+rule merge_fastq:
+    input:
+        lambda wildcards: sorted(
+            str(path)
+            for path in Path(
+                INPUT_DIR,
+                wildcards.sample
+            ).glob("*.fastq*")
+        )
+    output:
+        fastq=temp(
+            MERGED_DIR + "/{sample}.fastq"
+        )
+    run:
+        if not input:
+            raise ValueError(
+                f"Brak plików FASTQ dla {wildcards.sample}"
+            )
+
+        output_path = Path(output.fastq)
+        output_path.parent.mkdir(
+            parents=True,
+            exist_ok=True
+        )
+
+        with output_path.open("wb") as destination:
+            for filename in input:
+                filename = str(filename)
+
+                if filename.endswith(".gz"):
+                    with gzip.open(filename, "rb") as source:
+                        shutil.copyfileobj(
+                            source,
+                            destination
+                        )
+                else:
+                    with open(filename, "rb") as source:
+                        shutil.copyfileobj(
+                            source,
+                            destination
+                        )
+
+
+# ============================================================
+# Filtr długości dla pełnej długości 16S
+# Usuwamy krótkie fragmenty i podejrzane multimery/konkatemery
+# ============================================================
+
+rule filter_fastq_length:
+    input:
+        fastq=MERGED_DIR + "/{sample}.fastq"
+    output:
+        fastq=temp(
+            FILTERED_DIR + "/{sample}.fastq"
+        ),
+        stats=FILTERED_DIR + "/{sample}_length_filter.tsv"
+    params:
+        min_length=MIN_READ_LENGTH,
+        max_length=MAX_READ_LENGTH
+    shell:
+        r"""
+        mkdir -p "$(dirname {output.fastq})"
+
+        python /opt/BactoID/workflow/scripts/filter_fastq_length.py \
+          --input {input.fastq} \
+          --output {output.fastq} \
+          --stats {output.stats} \
+          --min-length {params.min_length} \
+          --max-length {params.max_length}
+        """
+
+
+# ============================================================
+# NGSpeciesID: liczba powstałych klastrów nie jest znana z góry
+# ============================================================
+
+checkpoint ngspeciesid:
+    input:
+        fastq=FILTERED_DIR + "/{sample}.fastq"
+    output:
+        outdir=directory(
+            NGSPECIESID_DIR + "/{sample}"
+        )
+    shell:
+        r"""
+        rm -rf {output.outdir}
+
+        NGSpeciesID \
+          --ont \
+          --fastq {input.fastq} \
+          --outfolder {output.outdir} \
+          --m {TARGET_AMPLICON_LENGTH} \
+          --s {AMPLICON_LENGTH_DEVIATION} \
+          --consensus \
+          --racon \
+          --racon_iter 3
+
+        test -n "$(
+          find {output.outdir} \
+            -path '*/racon_cl_id_*/consensus.fasta' \
+            -print -quit
+        )"
+        """
+
+
+# ============================================================
+# Kopiowanie wszystkich konsensusów po Medace
+# Każdy klaster pozostaje osobnym FASTA
+# ============================================================
+
+checkpoint prepare_consensus:
+    input:
+        ngspeciesid_dir=lambda wildcards: (
+            checkpoints.ngspeciesid.get(
+                sample=wildcards.sample
+            ).output.outdir
+        )
+    output:
+        consensus_dir=directory(
+            SELECTED_DIR
+            + "/{sample}/consensus"
+        ),
+        summary=SELECTED_DIR
+        + "/{sample}/clusters.tsv"
+    shell:
+        r"""
+        rm -rf {output.consensus_dir}
+        mkdir -p {output.consensus_dir}
+
+        python /opt/BactoID/workflow/scripts/select_consensus.py \
+          --input-dir {input.ngspeciesid_dir} \
+          --output-dir {output.consensus_dir} \
+          --summary {output.summary}
+        """
+
+
+# ============================================================
+# Po checkpointcie odczytujemy wszystkie utworzone FASTA
+# i generujemy osobny BLAST dla każdego klastra
+# ============================================================
+
+def get_top_hits_for_sample(wildcards):
+    checkpoint_output = checkpoints.prepare_consensus.get(
+        sample=wildcards.sample
+    ).output.consensus_dir
+
+    consensus_dir = Path(str(checkpoint_output))
+
+    fasta_files = sorted(
+        consensus_dir.glob("cluster_*.fasta")
+    )
+
+    if not fasta_files:
+        raise ValueError(
+            f"Brak konsensusów do BLAST dla "
+            f"{wildcards.sample}"
+        )
+
+    top_hit_files = []
+
+    for fasta in fasta_files:
+        stem = fasta.stem
+
+        top_hit_files.append(
+            os.path.join(
+                BLAST_RESULTS_DIR,
+                wildcards.sample,
+                f"{stem}_top.tsv"
+            )
+        )
+
+    return top_hit_files
+
+
+# ============================================================
+# Lokalny BLAST RefSeq 16S
+# Jeden konsensus = jeden osobny plik wynikowy
+# ============================================================
+
+rule blast_refseq:
+    input:
+        fasta=SELECTED_DIR
+        + "/{sample}/consensus/"
+        + "{cluster_name}.fasta"
+    output:
+        raw=BLAST_RESULTS_DIR
+        + "/{sample}/{cluster_name}.tsv"
+    params:
+        database=BLAST_DB,
+        blastdb_dir=os.path.dirname(BLAST_DB)
+    shell:
+        r"""
+        mkdir -p "$(dirname {output.raw})"
+
+        export BLASTDB="{params.blastdb_dir}"
+
+        blastn \
+          -task megablast \
+          -query {input.fasta} \
+          -db {params.database} \
+          -max_target_seqs 100 \
+          -max_hsps 1 \
+          -evalue 1e-20 \
+          -outfmt "6 qseqid saccver pident qcovs qlen slen length qstart qend sstart send bitscore sscinames stitle" \
+          -out {output.raw}
+        """
+
+
+# ============================================================
+# Zachowanie wszystkich hitów z najwyższym % identity
+# Query cover i bitscore nie rozstrzygają remisu
+# ============================================================
+
+rule filter_top_identity:
+    input:
+        raw=BLAST_RESULTS_DIR
+        + "/{sample}/{cluster_name}.tsv"
+    output:
+        top=BLAST_RESULTS_DIR
+        + "/{sample}/{cluster_name}_top.tsv"
+    params:
+        min_identity=97.0
+    shell:
+        r"""
+        python /opt/BactoID/workflow/scripts/filter_top_identity.py \
+          --input {input.raw} \
+          --output {output.top} \
+          --min-identity {params.min_identity}
+        """
+
+
+# ============================================================
+# Klasyfikacja wyników dla pojedynczego barcode'u
+# ============================================================
+
+rule classify_sample:
+    input:
+        clusters=SELECTED_DIR
+        + "/{sample}/clusters.tsv",
+        top_hits=get_top_hits_for_sample
+    output:
+        classification=CLASSIFICATION_DIR
+        + "/{sample}.tsv"
+    params:
+        blast_dir=BLAST_RESULTS_DIR
+        + "/{sample}",
+        min_query_length=MIN_READ_LENGTH,
+        max_query_length=MAX_READ_LENGTH
+    shell:
+        r"""
+        mkdir -p "$(dirname {output.classification})"
+
+        python /opt/BactoID/workflow/scripts/classify_hits.py \
+          --clusters {input.clusters} \
+          --blast-dir {params.blast_dir} \
+          --output {output.classification} \
+          --min-query-length {params.min_query_length} \
+          --max-query-length {params.max_query_length}
+        """
+
+
+# ============================================================
+# Zakończenie analizy pojedynczego barcode'u
+# ============================================================
+
+rule sample_complete:
+    input:
+        classification=CLASSIFICATION_DIR
+        + "/{sample}.tsv"
+    output:
+        done=touch(
+            COMPLETE_DIR
+            + "/{sample}.done"
+        )
+
+
+# ============================================================
+# Połączenie klasyfikacji wszystkich barcode'ów
+# ============================================================
+
+rule merge_classifications:
+    input:
+        expand(
+            CLASSIFICATION_DIR + "/{sample}.tsv",
+            sample=SAMPLES
+        )
+    output:
+        report=REPORT_DIR
+        + "/BactoID_results.tsv"
+    params:
+        classification_dir=CLASSIFICATION_DIR
+    shell:
+        r"""
+        mkdir -p "$(dirname {output.report})"
+
+        python /opt/BactoID/workflow/scripts/merge_classifications.py \
+          --classification-dir {params.classification_dir} \
+          --output {output.report}
+        """
+
+
+# ============================================================
+# Raport Excel z wersjonowaniem i informacjami o bazie
+# ============================================================
+
+rule create_excel_report:
+    input:
+        report=REPORT_DIR
+        + "/BactoID_results.tsv",
+        manifest=lambda wildcards: MANIFEST if MANIFEST else []
+    output:
+        excel=REPORT_DIR
+        + "/BactoID_results.xlsx"
+    params:
+        pipeline_version=PIPELINE_VERSION,
+        ngspeciesid_version=NGSPECIESID_VERSION,
+        blast_version=BLAST_VERSION,
+        database_name=DATABASE_NAME,
+        database_path=BLAST_DB,
+        logo=LOGO_PATH,
+        min_read_length=MIN_READ_LENGTH,
+        max_read_length=MAX_READ_LENGTH,
+        manifest_arg=lambda wildcards, input: (
+            f'--manifest "{input.manifest}"'
+            if input.manifest
+            else ""
+        )
+    shell:
+        r"""
+        python /opt/BactoID/workflow/scripts/create_excel_report.py \
+          --input {input.report} \
+          --output {output.excel} \
+          {params.manifest_arg} \
+          --pipeline-version "{params.pipeline_version}" \
+          --ngspeciesid-version "{params.ngspeciesid_version}" \
+          --blast-version "{params.blast_version}" \
+          --database-name "{params.database_name}" \
+          --database-path "{params.database_path}" \
+          --logo "{params.logo}" \
+          --min-read-length {params.min_read_length} \
+          --max-read-length {params.max_read_length}
+        """

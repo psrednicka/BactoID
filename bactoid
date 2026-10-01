@@ -1,0 +1,64 @@
+#!/bin/bash
+set -euo pipefail
+
+INPUT=""
+OUTPUT=""
+MANIFEST=""
+CORES=8
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --input)
+            INPUT="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT="$2"
+            shift 2
+            ;;
+        --manifest)
+            MANIFEST="$2"
+            shift 2
+            ;;
+        --cores)
+            CORES="$2"
+            shift 2
+            ;;
+        --help|-h)
+            echo "BactoID"
+            echo
+            echo "Usage:"
+            echo "  bactoid --input /path/to/fastq_pass --output /path/to/results [--manifest manifest.tsv] [--cores 8]"
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            exit 1
+            ;;
+    esac
+done
+
+if [[ -z "$INPUT" || -z "$OUTPUT" ]]; then
+    echo "ERROR: --input and --output are required"
+    exit 1
+fi
+
+mkdir -p "$OUTPUT"
+
+CONFIG_ARGS=(
+    "input=$INPUT"
+    "output=$OUTPUT"
+)
+
+if [[ -n "$MANIFEST" ]]; then
+    CONFIG_ARGS+=("manifest=$MANIFEST")
+fi
+
+cd "$OUTPUT"
+
+snakemake \
+    --snakefile /opt/BactoID/Snakefile \
+    --cores "$CORES" \
+    --rerun-incomplete \
+    --printshellcmds \
+    --config "${CONFIG_ARGS[@]}"

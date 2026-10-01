@@ -1,0 +1,9 @@
+*.sif
+*.tar.gz
+.snakemake/
+results/
+_archive/
+resources/blastdb/
+__pycache__/
+*.pyc
+*.before_*

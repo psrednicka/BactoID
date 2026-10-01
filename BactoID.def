@@ -1,0 +1,59 @@
+Bootstrap: localimage
+From: /home/psrednicka/BactoID_container_build/containers/bactoid-ngspeciesid_0.1.0.sif
+
+%files
+    VERSION /opt/BactoID/VERSION
+    Snakefile.container /opt/BactoID/Snakefile
+    workflow /opt/BactoID/workflow
+    resources /opt/BactoID/resources
+    examples /opt/BactoID/examples
+    bactoid /usr/local/bin/bactoid
+
+%post
+    apt-get update
+
+    apt-get install -y \
+        ncbi-blast+ \
+        ca-certificates
+
+    rm -rf /var/lib/apt/lists/*
+
+    /opt/conda/envs/bactoid-ngspeciesid/bin/python -m pip install \
+        --no-cache-dir \
+        snakemake \
+        xlsxwriter \
+        pillow
+
+    chmod +x /usr/local/bin/bactoid
+
+%environment
+    export PATH="/opt/conda/envs/bactoid-ngspeciesid/bin:/usr/bin:/usr/local/bin:$PATH"
+    export BACTOID_HOME="/opt/BactoID"
+
+%test
+    echo "=== BactoID container test ==="
+
+    NGSpeciesID --version || true
+    racon --version
+    blastn -version
+    snakemake --version
+
+    /opt/conda/envs/bactoid-ngspeciesid/bin/python - <<'PY'
+import xlsxwriter
+from PIL import Image
+
+print("xlsxwriter:", xlsxwriter.__version__)
+print("Pillow: OK")
+PY
+
+    test -f /opt/BactoID/Snakefile
+    test -d /opt/BactoID/workflow
+    test -d /opt/BactoID/resources/blastdb
+
+    echo "BactoID container: OK"
+
+%labels
+    Author "Paulina Srednicka"
+    Application "BactoID"
+    Version "0.5.0"
+    Description "ONT full-length 16S bacterial isolate identification workflow"
